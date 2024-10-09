@@ -1,0 +1,6 @@
+.cache
+.envrc
+assets/datasets_old
+*.csv
+*.nix
+*.zip
