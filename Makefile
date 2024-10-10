@@ -17,12 +17,15 @@
 #		echo "my-target is updated only if needed and now I'm doing something"
 #
 
+RANDOM_PORT_1:=$(shell shuf -i 1024-65535 -n 1)
+RANDOM_PORT_2:=$(shell shuf -i 1024-65535 -n 1)
+
 DATASETS=$(shell find assets/datasets -not -path './.cache*' -iname '*.csv')
-DATASET_TARGETS=$(shell echo ${DATASETS} | xargs -r -n 1 basename | sed 's/\.csv//g' | xargs -r -I {} echo .cache/${NAMESPACE}/make/load-datasets/{} )
+DATASET_TARGETS=$(shell echo ${DATASETS} | sed 's#assets/datasets/#.cache/${NAMESPACE}/make/load-datasets/#g' | sed 's/\.csv//g' )
+# SEARCH_PATH=$(shell echo ${DATASETS} | sed 's#assets/datasets/\([^/]*\)/[^ ]*#\1,#g' )
 SQLC_QUERIES=$(shell find db/sqlc -not -path './.cache*' -iname '*.sql' | grep -v schema.sql)
 MIGRATE_PATH=db/migrations
 MIGRATIONS=$(shell find ${MIGRATE_PATH} -not -path './.cache*' -iname '*.sql')
-RANDOM_PORT:=$(shell shuf -i 1024-65535 -n 1)
 
 # overrideable by environment variables
 DATA_DIRECTORY?=${PWD}/.cache/${NAMESPACE}/data
@@ -43,15 +46,18 @@ MIGRATE_VERSION?=$(shell echo "${MIGRATE_VERSION_FILE}" | sed -E 's|([0-9]*)_.*.
 PROMPT_MIGRATION_NAME?=$(shell bash -c 'read -p "Descriptive Filename Part (e.g. sphincs_private_ica): " migration; echo $$migration')
 PGADMIN_DEFAULT_EMAIL?=admin@${PGHOST}.com
 PGADMIN_DEFAULT_PASSWORD?=${PGPASSWORD}
-PGADMIN_PORT?=$(strip $(shell docker container inspect --format='{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' ${PGHOST}-pgadmin 2>/dev/null || echo "${RANDOM_PORT}"))
+PGADMIN_PORT?=$(strip $(shell docker container inspect --format='{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' ${PGHOST}-pgadmin 2>/dev/null || echo "${RANDOM_PORT_1}"))
+PG_HOST_PORT?=$(strip $(shell docker container inspect --format='{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' ${PGHOST}-pgadmin 2>/dev/null || echo "${RANDOM_PORT_2}"))
 PGADMIN_VERSION?=8.12.0
 BROWSER?="Google Chrome"
 GO_VERSION?=$(shell head -n 3 go.mod | xargs -n 1 | tail -n 1)
 GO_REPO_URL=$(shell head -n 1 go.mod | xargs -n 1 | tail -n 1)
+LOCAL_PG_PORT=$(shell docker container inspect --format='{{(index (index .NetworkSettings.Ports "${PGPORT}/tcp") 0).HostPort}}' ${PGHOST})
+LOCAL_DB_CONN_STRING?=postgresql://${PGUSER}:${PGPASSWORD}@localhost:${LOCAL_PG_PORT}/${PGDATABASE}?sslmode=disable
 
 .PHONY: debug
 debug:
-	echo curl "http://localhost:${PGADMIN_PORT}"
+	echo ${DATASET_TARGETS}
 
 .DEFAULT_GOAL=help
 .PHONY: help
@@ -100,7 +106,7 @@ postgres-start: docker-network ## Start postgres if it isn't started and return 
 		--detach \
 		--name ${PGHOST} \
 		--rm \
-		--publish ${PGPORT}:${PGPORT} \
+		--publish ${PG_HOST_PORT}:${PGPORT} \
 		--env POSTGRES_PASSWORD=${PGPASSWORD} \
 		--env POSTGRES_USER=${PGUSER} \
 		--env POSTGRES_DB=${PGDATABASE} \
@@ -108,6 +114,13 @@ postgres-start: docker-network ## Start postgres if it isn't started and return 
 		--network '${NETWORK}' \
 		--volume ${DATA_DIRECTORY}:/var/lib/postgresql/data \
 		postgres:${POSTGRES_VERSION}
+
+.PHONY: psql-local
+psql-local: postgres-wait ## Start an interactive postgres shell using local psql
+		psql \
+			-d ${LOCAL_DB_CONN_STRING} \
+			--pset expanded=auto \
+			-f -
 
 .PHONY: psql
 psql: postgres-wait ## Start an interactive postgres shell
@@ -117,7 +130,10 @@ psql: postgres-wait ## Start an interactive postgres shell
 		--tty \
 		--rm \
 		--network '${NETWORK}' \
-		postgres:${POSTGRES_VERSION} psql -d ${DB_CONN_STRING}
+		postgres:${POSTGRES_VERSION} psql \
+			-d ${DB_CONN_STRING} \
+			--pset expanded=auto \
+			-f -
 
 .PHONY: pgadmin
 pgadmin: postgres-wait ## Start pgadmin and open in browser window
@@ -274,10 +290,17 @@ db/sqlc/schema.sql: .cache/${NAMESPACE}/make/postgres-migrate
 		--name ${PGHOST}-wait \
 		--rm \
 		--network '${NETWORK}' \
+		postgres:${POSTGRES_VERSION} psql \
+			-d ${DB_CONN_STRING} \
+			-c 'CREATE SCHEMA IF NOT EXISTS $(*D)';
+	docker run \
+		--name ${PGHOST}-wait \
+		--rm \
+		--network '${NETWORK}' \
 		--volume ${PWD}/assets/datasets:/workdir/assets/datasets \
 		--volume ${PWD}/scripts/load_data.sh:/workdir/load_data.sh \
 		--workdir /workdir \
-		fantasy-csvkit ./load_data.sh $< $(@F) ${DB_CONN_STRING}
+		fantasy-csvkit ./load_data.sh $< $(@F) ${DB_CONN_STRING} $(*D)
 	@mkdir -p $(@D)
 	@touch $@
 

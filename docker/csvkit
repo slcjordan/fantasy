@@ -1,0 +1,3 @@
+FROM python:3.12
+
+RUN apt-get update && pip install csvkit psycopg2
